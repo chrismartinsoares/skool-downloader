@@ -22,10 +22,11 @@ type CliArgs = {
     rollback?: boolean;
     skipModules?: string[];
     skipCourses?: string[];
+    noDiscussions?: boolean;
 };
 
 function showHelp() {
-    console.log(`\nSkool Downloader\n\nUsage:\n  skool                          Interactive mode\n  skool login                    Log in to Skool\n  skool <classroom-url>          Download a course\n  skool <group-classroom-url>    Download all courses in a community\n  skool <lesson-url>             Download a single lesson (URL with ?md=)\n  skool regenerate-index         Regenerate all course indexes\n  skool update                   Update the yt-dlp binary to the latest release\n\nOptions:\n  -o, --output <dir>             Output directory (course root)\n  -c, --concurrency <number>     Lesson concurrency (default: 8)\n  --course                       Force course mode (ignore ?md=)\n  --lesson                       Force lesson mode\n  --lesson-id <id>               Explicit lesson id\n  --skip-module <regex>          Skip modules whose title matches (repeatable)\n  --skip-course <regex>          With a community URL, skip matching courses (repeatable)\n  --rollback                     With 'update', restore the previous yt-dlp\n  -h, --help                     Show help\n\nEnvironment:\n  SKOOL_DOWNLOADER_CACHE_DIR     Where the yt-dlp binary is kept\n  SKOOL_NO_YTDLP_UPDATE=1        Never check for a newer yt-dlp automatically\n`);
+    console.log(`\nSkool Downloader\n\nUsage:\n  skool                          Interactive mode\n  skool login                    Log in to Skool\n  skool <classroom-url>          Download a course\n  skool <group-classroom-url>    Download all courses in a community\n  skool <lesson-url>             Download a single lesson (URL with ?md=)\n  skool regenerate-index         Regenerate all course indexes\n  skool update                   Update the yt-dlp binary to the latest release\n\nOptions:\n  -o, --output <dir>             Output directory (course root)\n  -c, --concurrency <number>     Lesson concurrency (default: 8)\n  --course                       Force course mode (ignore ?md=)\n  --lesson                       Force lesson mode\n  --lesson-id <id>               Explicit lesson id\n  --skip-module <regex>          Skip modules whose title matches (repeatable)\n  --skip-course <regex>          With a community URL, skip matching courses (repeatable)\n  --no-discussions               Don't save community posts/comments that link each lesson\n  --rollback                     With 'update', restore the previous yt-dlp\n  -h, --help                     Show help\n\nEnvironment:\n  SKOOL_DOWNLOADER_CACHE_DIR     Where the yt-dlp binary is kept\n  SKOOL_NO_YTDLP_UPDATE=1        Never check for a newer yt-dlp automatically\n`);
 }
 
 function parseArgs(args: string[]): CliArgs {
@@ -45,6 +46,10 @@ function parseArgs(args: string[]): CliArgs {
         }
         if (arg === 'update') {
             parsed.command = 'update';
+            continue;
+        }
+        if (arg === '--no-discussions') {
+            parsed.noDiscussions = true;
             continue;
         }
         if (arg === '--rollback') {
@@ -123,10 +128,6 @@ function buildInteractiveLogger(): Logger {
 function formatExpiry(expiresAt?: Date) {
     if (!expiresAt) return 'unknown time';
     return expiresAt.toLocaleString();
-}
-
-function sanitizeName(value: string) {
-    return value.replace(/[/\\?%*:|"<>]/g, '-');
 }
 
 function isClassroomRootUrl(value: string) {
@@ -232,9 +233,6 @@ function filterAccessibleCourses(courses: CourseListItem[]) {
     return { accessible, locked };
 }
 
-function resolveCourseOutputDir(outputRoot: string, groupName: string, courseName: string) {
-    return path.join(outputRoot, sanitizeName(groupName), sanitizeName(courseName));
-}
 
 /**
  * Communities sometimes have two courses with the same title (for example two
@@ -395,7 +393,9 @@ async function runInteractive() {
                 const folderTitle = courseFolderTitle(course, library.courses);
                 const summary = await downloadCourse({
                     url: course.url,
-                    outputDir: outputRoot ? resolveCourseOutputDir(outputRoot, library.groupName, folderTitle) : undefined,
+                    outputRoot,
+                    groupDirName: outputRoot ? library.groupName : undefined,
+                    courseNumber: library.courses.indexOf(course) + 1,
                     courseDirName: folderTitle,
                     concurrency,
                     mode: 'course',
@@ -621,11 +621,14 @@ async function runWithArgs(args: CliArgs) {
                     const folderTitle = courseFolderTitle(course, library.courses);
                     await downloadCourse({
                         url: course.url,
-                        outputDir: outputRoot ? resolveCourseOutputDir(outputRoot, library.groupName, folderTitle) : undefined,
+                        outputRoot,
+                        groupDirName: outputRoot ? library.groupName : undefined,
+                        courseNumber: library.courses.indexOf(course) + 1,
                         courseDirName: folderTitle,
                         concurrency: args.concurrency,
                         mode: 'course',
-                        skipModules: args.skipModules
+                        skipModules: args.skipModules,
+                        skipDiscussions: args.noDiscussions
                     });
                 } catch (err) {
                     failedCourses += 1;
@@ -645,7 +648,8 @@ async function runWithArgs(args: CliArgs) {
             concurrency: args.concurrency,
             mode: args.mode,
             lessonId: args.lessonId,
-            skipModules: args.skipModules
+            skipModules: args.skipModules,
+            skipDiscussions: args.noDiscussions
         });
         return;
     }

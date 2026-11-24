@@ -4,6 +4,7 @@ import { regenerateIndex } from './regenerate-index.js';
 import { regenerateGroupIndex } from './regenerate-group-index.js';
 import { createConsoleLogger, type Logger } from './logger.js';
 import { LinkArchiver, renderLinkItems, type LinkInput, type LinkRecord } from './external.js';
+import { DiscussionFetcher, renderDiscussions, countComments, DISCUSSIONS_CSS, type Discussion } from './discussions.js';
 import fs from 'fs-extra';
 import path from 'path';
 import pLimit from 'p-limit';
@@ -74,6 +75,10 @@ type LessonManifest = {
     videoError?: string;
     linksCount?: number;
     failedLinks?: number;
+    /** Community posts that link this lesson, saved in discussions.json. */
+    discussionsCount?: number;
+    commentsCount?: number;
+    discussionsError?: string;
     updatedAt: string;
 };
 
@@ -129,6 +134,20 @@ export type DownloadOptions = {
     skipModules?: string[];
     /** Folder name for the course, used when two courses share a title. */
     courseDirName?: string;
+    /**
+     * Root that holds `<group>/<NN-course>`. Defaults to `./downloads`. Unlike
+     * `outputDir` (the exact course folder), the course still gets its number.
+     */
+    outputRoot?: string;
+    /** Folder name for the community under `outputRoot`. Defaults to the group slug. */
+    groupDirName?: string;
+    /**
+     * 1-based position of the course in the classroom. The course page itself
+     * does not carry the classroom list, so the caller passes it when known.
+     */
+    courseNumber?: number;
+    /** Skip fetching community posts/comments that link each lesson. */
+    skipDiscussions?: boolean;
     logger?: Logger;
     callbacks?: DownloadCallbacks;
     suppressIndexLogs?: boolean;
@@ -165,6 +184,19 @@ function getUrlExtension(url: string) {
         // Ignore parsing errors, fallback below.
     }
     return '.jpg';
+}
+
+/**
+ * Courses downloaded before folders were numbered live in "<title>". Rename
+ * that folder to "NN-<title>" so a rerun resumes instead of downloading the
+ * course again. Only a folder holding a course manifest is moved.
+ */
+async function migrateUnnumberedCourseDir(legacyDir: string, numberedDir: string, logger: Logger) {
+    if (legacyDir === numberedDir) return;
+    if (await fs.pathExists(numberedDir)) return;
+    if (!(await fs.pathExists(path.join(legacyDir, '.course.json')))) return;
+    await fs.move(legacyDir, numberedDir);
+    logger.info(`📁 Renamed "${path.basename(legacyDir)}" → "${path.basename(numberedDir)}" (classroom order)`);
 }
 
 function sanitizeName(value: string) {
@@ -248,6 +280,7 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
         getBrowserContext: () => scraper.getContext(),
         saveVideo: (url, dir, name, videoOptions) => downloader.downloadVideo(url, dir, name, videoOptions)
     });
+    const discussionFetcher = new DiscussionFetcher(() => scraper.getContext(), logger);
 
     let completedLessons = 0;
     let failedLessons = 0;
@@ -255,6 +288,18 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
     try {
         logger.info('🚀 Fetching course structure...');
         let { modules, courseName, groupName, courseImageUrl, courseIndex } = await scraper.parseClassroom(classroomUrl);
+        if (options.courseNumber !== undefined) courseIndex = options.courseNumber - 1;
+        if (courseIndex === undefined) {
+            // Course pages don't list the classroom; read it once for the number.
+            try {
+                const library = await scraper.parseCourseLibrary(classroomUrl);
+                const slug = classroomUrl.replace(/\/$/, '').split('/').pop();
+                const found = library.courses.findIndex(c => c.name === slug || c.id === slug || c.url.endsWith(`/${slug}`));
+                if (found >= 0) courseIndex = found;
+            } catch {
+                // Unnumbered folder; same as before numbering existed.
+            }
+        }
 
         if (modules.length === 0) {
             throw new Error('No modules found. Are you sure this is a classroom URL and you are logged in?');
@@ -292,14 +337,19 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
         }
 
         const sanitizedGroupName = sanitizeName(groupName);
-        const sanitizedCourseName = sanitizeName(options.courseDirName ?? courseName);
+        const unnumberedCourseName = sanitizeName(options.courseDirName ?? courseName);
+        // "01-Start Here", "02-…": folders sort in classroom order, as on Skool.
+        const sanitizedCourseName = courseIndex !== undefined
+            ? `${String(courseIndex + 1).padStart(2, '0')}-${unnumberedCourseName}`
+            : unnumberedCourseName;
 
-        const defaultOutputDir = path.join(
-            process.cwd(),
-            'downloads',
-            sanitizedGroupName,
-            sanitizedCourseName
+        const groupOutputDir = path.join(
+            options.outputRoot && options.outputRoot !== 'undefined'
+                ? options.outputRoot
+                : path.join(process.cwd(), 'downloads'),
+            options.groupDirName ? sanitizeName(options.groupDirName) : sanitizedGroupName
         );
+        const defaultOutputDir = path.join(groupOutputDir, sanitizedCourseName);
 
         const outputOverride =
             options.outputDir && options.outputDir !== 'undefined'
@@ -308,6 +358,14 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
         const baseOutputDir = outputOverride || defaultOutputDir;
         if (!baseOutputDir) {
             throw new Error('Output directory resolution failed.');
+        }
+
+        if (!outputOverride && sanitizedCourseName !== unnumberedCourseName) {
+            await migrateUnnumberedCourseDir(
+                path.join(groupOutputDir, unnumberedCourseName),
+                defaultOutputDir,
+                logger
+            );
         }
 
         await fs.ensureDir(baseOutputDir);
@@ -508,6 +566,21 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
                             }
                             const failedLinks = links.filter(l => l.status === 'failed').length;
 
+                            let discussions: Discussion[] = [];
+                            let discussionsError: string | undefined;
+                            if (!options.skipDiscussions) {
+                                try {
+                                    updateStatus('Fetching community discussions...');
+                                    discussions = await discussionFetcher.fetchForLesson(lesson.url, lesson.id);
+                                    if (discussions.length > 0) {
+                                        await writeAtomicJson(path.join(lessonDir, 'discussions.json'), discussions);
+                                    }
+                                } catch (err) {
+                                    discussionsError = String(err).slice(0, 300);
+                                    logger.warn(`    ⚠️ Could not fetch community discussions for ${lesson.title}: ${discussionsError}`);
+                                }
+                            }
+
                             const isRootLesson = mInfo.moduleDirName.length === 0;
                             const groupLink = isRootLesson ? '../../index.html' : '../../../index.html';
                             const courseLink = isRootLesson ? '../index.html' : '../../index.html';
@@ -602,6 +675,7 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
                                     a { color: var(--accent); text-decoration: none; word-break: break-word; }
                                     a:hover { text-decoration: underline; }
                                     .nav { margin-top: 28px; padding-top: 16px; border-top: 1px solid rgba(20,22,29,0.08); }
+                                    ${DISCUSSIONS_CSS}
                                 </style>
                             </head>
                             <body>
@@ -636,6 +710,7 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
                                             </ul>
                                         </div>
                                         ` : ''}
+                                        ${renderDiscussions(discussions)}
                                         <div class="nav">
                                             <a href="${courseLink}">Back to Course Index</a>
                                         </div>
@@ -666,6 +741,9 @@ export async function downloadCourse(options: DownloadOptions): Promise<Download
                                 videoError,
                                 linksCount: links.length,
                                 failedLinks,
+                                discussionsCount: discussions.length,
+                                commentsCount: countComments(discussions),
+                                discussionsError,
                                 updatedAt: new Date().toISOString()
                             };
 

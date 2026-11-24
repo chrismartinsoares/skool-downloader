@@ -13,6 +13,8 @@ This tool downloads video content, localizes images, preserves course attachment
 - **🔗 Linked Document Backup:** Links in lesson resources and lesson text are saved too. Google Docs become `.docx` and `.pdf`, Google Sheets become `.xlsx`, Google Slides become `.pptx` and `.pdf`, public Drive files and folders are downloaded, and Miro boards are saved as an overview image, a readable zoomed-in image per board area, and a text file with every note on the board. Google files linked from inside a saved Google Doc are saved one level deep. Every other link (tools, referral links) is recorded with its exact URL in the lesson page and in `links.json`.
 - **🎯 Single Lesson Mode:** Download a whole course or just a single lesson using a specific URL.
 - **🛠 Interrupted Download Recovery:** Skips already downloaded files and includes a tool to regenerate the index page.
+- **💬 Community Discussions:** Skool lessons have no comment thread; discussion happens in community posts. Every post that links a lesson (in its text or in a comment) is saved with all its comments and replies to `discussions.json` and shown in a collapsible "Community Discussions" section of the lesson page. Turn it off with `--no-discussions`.
+- **🔢 Classroom Order on Disk:** Course folders are numbered as on Skool (`01-Start Here`, `02-…`), so the file explorer lists them in classroom order. Folders from earlier runs without the number are renamed on the next run instead of being downloaded again.
 - **♻️ Self-Updating `yt-dlp`:** Checks once a day for a newer `yt-dlp` and installs it before downloading, so video sites that change how they serve media keep working. The previous copy is kept for a one-command rollback.
 
 ## 🛠 Prerequisites
@@ -112,13 +114,21 @@ npm run skool https://www.skool.com/your-community/classroom/course-id -- --skip
 
 If two courses in a community have the same title, the second one is saved as `Course Name (course-id)` so they do not overwrite each other.
 
+To skip the community posts/comments that discuss each lesson (faster, fewer requests to Skool):
+
+```bash
+npm run skool https://www.skool.com/your-community/classroom -- --no-discussions
+```
+
+> On Windows, `npm run` passes arguments through `cmd.exe`, which eats `^` in regular expressions. Run `node --import tsx src/cli.ts <url> --skip-course "^…"` instead when a pattern needs it.
+
 ## 📁 Output Structure
 
 The tool creates a `downloads/` folder with the following structure:
 ```text
 downloads/
 └── Community Name/
-    └── Course Name/
+    └── 01-Course Name/ (numbered in classroom order)
         ├── index.html (Master navigation page)
         └── 1-Module Name/
             ├── 1-Lesson Title/
@@ -127,6 +137,7 @@ downloads/
             │   ├── assets/ (Localized images)
             │   ├── links.json (Every link, its type, and its saved copies)
             │   ├── lesson.json (Lesson metadata, video source, any errors)
+            │   ├── discussions.json (Community posts linking this lesson + their comments)
             │   └── resources/ (Attachments and saved Google/Drive/Miro copies)
             │       └── linked-from/ (Google files linked inside a saved doc)
             └── ...
